@@ -1,0 +1,130 @@
+version: "3.9"
+
+# ─── Networks ──────────────────────────────────────────────────────────────────
+networks:
+  ai-network:
+    driver: bridge
+
+# ─── Volumes ───────────────────────────────────────────────────────────────────
+volumes:
+  mongo-data:
+  redis-data:
+  vector-store-data:
+
+# ─── Services ──────────────────────────────────────────────────────────────────
+services:
+
+  # ── MongoDB ─────────────────────────────────────────────────────────────────
+  mongodb:
+    image: mongo:7-jammy
+    container_name: ai-platform-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: secret
+      MONGO_INITDB_DATABASE: ai-platform
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis (BullMQ queue + optional session cache) ────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: ai-platform-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis-data:/data
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── Backend ──────────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./Backend
+      dockerfile: docker/production/Dockerfile
+    container_name: ai-platform-backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      ENV: production
+      PORT: 3000
+      SERVER_URL: http://localhost:3000
+
+      # Database — uses Docker service name
+      DATABASE_URL: "mongodb://admin:secret@mongodb:27017/ai-platform?authSource=admin"
+
+      # Redis — uses Docker service name
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+
+      # AI keys — override via .env or environment at deploy time
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_API_KEY_2: ${GROQ_API_KEY_2:-}
+      GROQ_API_KEY_3: ${GROQ_API_KEY_3:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      SERPER_API_KEY: ${SERPER_API_KEY}
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY}
+
+      # Security tokens
+      ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET:-change-me-in-production}
+      REFRESH_TOKEN_SECRET: ${REFRESH_TOKEN_SECRET:-change-me-in-production}
+
+      # RAG
+      VECTOR_STORE_PATH: /usr/src/app/data/vector-store.json
+      RAG_TOP_K: 5
+      RAG_SIMILARITY_THRESHOLD: "0.15"
+
+      # Scraper
+      SCRAPER_TIMEOUT_MS: "15000"
+      SCRAPER_MAX_RETRIES: "3"
+      SCRAPER_CONCURRENCY: "5"
+
+      # CORS — allow frontend origin
+      ALLOWED_ORIGINS: "http://localhost,http://localhost:80,http://frontend"
+    volumes:
+      - vector-store-data:/usr/src/app/data
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - ai-network
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ── Frontend ─────────────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./Frontend
+      dockerfile: Dockerfile
+    container_name: ai-platform-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - ai-network
