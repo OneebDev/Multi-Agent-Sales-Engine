@@ -21,10 +21,25 @@ const OPPORTUNITY_COLOR = {
 }
 
 export function MarketIntelOutput({ data }: Props) {
-  const hasSectors   = data.bestSectors?.length > 0
-  const hasServices  = data.bestServices?.length > 0
-  const hasCountries = data.bestCountries?.length > 0
-  const hasCities    = data.bestCities?.length > 0
+  if (!data) return null
+
+  const {
+    topic = 'Market Intelligence Report',
+    bestSectors = [],
+    bestServices = [],
+    bestCountries = [],
+    bestCities = [],
+    keyInsights = [],
+    justification = '',
+    recommendation = '',
+    references = [],
+    wantsList = false
+  } = data
+
+  const hasSectors   = bestSectors && bestSectors.length > 0
+  const hasServices  = bestServices && bestServices.length > 0
+  const hasCountries = bestCountries && bestCountries.length > 0
+  const hasCities    = bestCities && bestCities.length > 0
 
   return (
     <div className="space-y-6 text-sm">

@@ -1,4 +1,4 @@
-import { groqChat, groqComplete } from '../tools/groq.tool'
+import { groqChat } from '../tools/groq.tool'
 import { runResearcherAgent } from '../agents/researcher.agent'
 import { getGroqHistory } from '../ai/session-memory'
 import { detectLanguage, getResponseLanguageInstruction } from '../ai/language-detector'
@@ -68,6 +68,7 @@ export interface LearningResponse {
     requestedCounts: RequestedRefCounts
     deliveredCounts: DeliveredRefCounts
     notes: string[]   // shortfall reasons, warnings, etc.
+    insights?: string[] // Top takeaways for standardized UI
     references: {
         articles: ArticleReference[]
         videos: VideoReference[]
@@ -145,11 +146,13 @@ Return ONLY a valid JSON array with exactly ${items.length} objects:
 For non-paper types, omit "explanation" or set it to "".`
 
     try {
-        const raw = await groqComplete(
-            'You are a research quality evaluator. Respond ONLY with a valid JSON array.',
-            prompt,
-            { temperature: 0.2, maxTokens: Math.min(items.length * 120 + 100, 2000) }
-        )
+        const { groqChatUtility } = await import('../tools/groq.tool')
+        const message = await groqChatUtility([
+            { role: 'system', content: 'You are a research quality evaluator. Respond ONLY with a valid JSON array.' },
+            { role: 'user', content: prompt }
+        ], { temperature: 0.2, maxTokens: Math.min(items.length * 150 + 100, 3000) })
+        
+        const raw = message.content
         const match = raw.match(/\[[\s\S]*\]/)
         if (match) {
             const parsed = JSON.parse(match[0]) as JustResult[]
@@ -227,42 +230,40 @@ Respond with EXACTLY this JSON structure (no extra text). Write ALL text in the 
   "advancedInsights": "Expert-level nuances, recent developments, limitations, future outlook (200-300 words)"
 }`
 
-    history.push({ role: 'user', content: synthesisPrompt })
-
-    let simpleExplanation = ''
-    let detailedBreakdown = ''
-    let realWorldExamples = ''
-    let advancedInsights = ''
-
-    try {
-        const res = await groqChat(history, { temperature: 0.6, maxTokens: 3000 })
-        const match = res.content.match(/\{[\s\S]*\}/)
-        if (match) {
-            const parsed = JSON.parse(match[0]) as Record<string, string>
-            simpleExplanation = parsed.simpleExplanation || ''
-            detailedBreakdown = parsed.detailedBreakdown || ''
-            realWorldExamples = parsed.realWorldExamples || ''
-            advancedInsights = parsed.advancedInsights || ''
-        } else {
-            simpleExplanation = res.content.slice(0, 400)
+    // 5. Parallel Processing: Synthesis (70b) + Justifications (8b Utility)
+    const synthesisPromise = (async () => {
+        history.push({ role: 'user', content: synthesisPrompt })
+        // Proactive jitter delay to avoid burst rate limits on 70b synthesis
+        await new Promise(r => setTimeout(r, 500 + Math.random() * 500))
+        try {
+            const res = await groqChat(history, { temperature: 0.6, maxTokens: 3000 })
+            const match = res.content.match(/\{[\s\S]*\}/)
+            if (match) {
+                const parsed = JSON.parse(match[0]) as Record<string, string>
+                return {
+                    simpleExplanation: parsed.simpleExplanation || '',
+                    detailedBreakdown: parsed.detailedBreakdown || '',
+                    realWorldExamples: parsed.realWorldExamples || '',
+                    advancedInsights: parsed.advancedInsights || ''
+                }
+            }
+            return { simpleExplanation: res.content.slice(0, 400), detailedBreakdown: '', realWorldExamples: '', advancedInsights: '' }
+        } catch (err) {
+            logger.error('LearningPipeline: LLM synthesis failed', { meta: err })
+            const msg = err instanceof Error ? err.message : ''
+            if (msg.includes('rate limit') || msg.includes('rate_limit')) throw err
+            return { simpleExplanation: 'I encountered an error generating a response. Please try again.', detailedBreakdown: '', realWorldExamples: '', advancedInsights: '' }
         }
-    } catch (err) {
-        logger.error('LearningPipeline: LLM synthesis failed', { meta: err })
-        const msg = err instanceof Error ? err.message : ''
-        if (msg.includes('rate limit') || msg.includes('rate_limit')) throw err
-        simpleExplanation = 'I encountered an error generating a response. Please try again.'
-    }
+    })()
 
-    // 6. Select top candidates (3x) then slice to exactly N
+    // 6. Select candidates for justifications
     const rawArticles = research.webResults
         .filter((r) => !r.link.includes('youtube.com') && !r.link.includes('arxiv.org'))
         .slice(0, requestedCounts.articles * 3)
-
     const rawVideos = research.videos.slice(0, requestedCounts.videos * 3)
     const rawPapers = research.paperResults.slice(0, requestedCounts.papers * 3)
     const rawNews = research.newsResults.slice(0, requestedCounts.news * 3)
 
-    // 7. Batch-generate justifications (single Groq call for all refs)
     const justItems: JustItem[] = [
         ...rawArticles.slice(0, requestedCounts.articles).map((r, i) => ({
             idx: i, type: 'article' as const, title: r.title, snippet: r.snippet
@@ -278,7 +279,12 @@ Respond with EXACTLY this JSON structure (no extra text). Write ALL text in the 
         }))
     ]
 
-    const justResults = await batchGenerateJustifications(query, justItems)
+    const justificationPromise = batchGenerateJustifications(query, justItems)
+
+    // Execute both in parallel
+    const [synRes, justResults] = await Promise.all([synthesisPromise, justificationPromise])
+
+    const { simpleExplanation, detailedBreakdown, realWorldExamples, advancedInsights } = synRes
 
     // Split justifications back per type
     let jIdx = 0
@@ -354,6 +360,13 @@ Respond with EXACTLY this JSON structure (no extra text). Write ALL text in the 
         }
     })
 
+    // Final enrichment: Extract 3 key takeaways for the standardized UI
+    const insights = advancedInsights
+        .split('\n')
+        .filter(line => line.trim().length > 10)
+        .slice(0, 3)
+        .map(s => s.replace(/^[•\-\*\d\.\s]+/, '').trim())
+
     return {
         query,
         simpleExplanation,
@@ -363,6 +376,7 @@ Respond with EXACTLY this JSON structure (no extra text). Write ALL text in the 
         requestedCounts,
         deliveredCounts,
         notes,
+        insights: insights.length > 0 ? insights : ['Deep dive into research topics', 'Verified academic and web sources', 'Comprehensive detailed breakdown'],
         references: { articles, videos, papers, news },
         ragContextUsed: !!research.ragContext
     }

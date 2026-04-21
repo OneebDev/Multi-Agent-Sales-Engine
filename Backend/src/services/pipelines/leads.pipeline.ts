@@ -1,9 +1,6 @@
-import { searchCompanies } from '../tools/serper.tool'
 import { runCrawlerAgent } from '../agents/crawler.agent'
-import { criticValidateCompany, analyzeBusinessGap } from '../agents/critic.agent'
-import { groqComplete } from '../tools/groq.tool'
-import { normalizeSector, getSectorFallbacks } from '../ai/sector-mapper'
-import { ExtractedCompanyData } from '../scraper/data-extractor'
+import { criticValidateCompany, batchAnalyzeBusinessGaps } from '../agents/critic.agent'
+import { normalizeSector } from '../ai/sector-mapper'
 import logger from '../../handlers/logger'
 
 export interface LeadsPipelineInput {
@@ -13,7 +10,8 @@ export interface LeadsPipelineInput {
     sector: string
     country: string
     city?: string
-    count?: number  // desired number of leads — default 10
+    count?: number
+    requestedSources?: { source: 'google' | 'linkedin' | 'facebook' | 'instagram' | 'twitter' | 'other'; count?: number }[]
 }
 
 export interface LeadJustification {
@@ -45,7 +43,9 @@ export interface StructuredLead {
 
     justification: LeadJustification
     confidenceScore: number
+    source: string
     scrapedAt: string
+    verificationStatus: 'verified' | 'partially_verified' | 'unverified'
 }
 
 export interface LeadsResponse {
@@ -55,6 +55,7 @@ export interface LeadsResponse {
     requestedCount: number
     leads: StructuredLead[]
     totalFound: number
+    status: 'complete' | 'partial' | 'low_confidence'
     timestamp: string
     processingNotes: string[]
     overallStrategy: string
@@ -63,121 +64,204 @@ export interface LeadsResponse {
 export async function runLeadsPipeline(input: LeadsPipelineInput): Promise<LeadsResponse> {
     const { domain, country, city, sessionId } = input
     const requestedCount = input.count ?? 10
-    const fetchCount = requestedCount * 3
     const location = city ? `${city}, ${country}` : country
     const notes: string[] = []
 
-    // Normalize sector to a lead-gen friendly name
-    const sector = normalizeSector(input.sector)
-    if (sector !== input.sector) notes.push(`Sector normalized: "${input.sector}" → "${sector}"`)
+    logger.info('LeadsPipeline: start', { meta: { sessionId, domain, location, requestedCount } })
 
-    logger.info('LeadsPipeline: start', { meta: { sessionId, domain, sector, location, requestedCount, fetchCount } })
-
-    // STEP 1: Generate overall strategy before searching
-    notes.push(`Planning strategy for selling ${domain} to ${sector} in ${location}...`)
-    const overallStrategy = await groqComplete(
-        'You are a B2B sales strategist.',
-        `In 3-4 sentences, describe the best strategy for selling "${domain}" to ${sector} businesses in ${location}. Include: why this market is good, what pain points to target, and best outreach approach.`,
-        { temperature: 0.5, maxTokens: 300 }
-    ).catch(() => '')
-
-    // STEP 2: Search with fallback logic
-    notes.push(`Searching for ${fetchCount} ${sector} companies in ${location}...`)
-    let serperResults = await searchCompanies(domain, sector, location, fetchCount)
-    notes.push(`Found ${serperResults.length} search results`)
-
-    // If no results, try fallback sectors in order
-    if (serperResults.length === 0) {
-        const fallbacks = getSectorFallbacks(sector)
-        for (const fallbackSector of fallbacks) {
-            notes.push(`No results for "${sector}" — trying fallback: "${fallbackSector}"...`)
-            serperResults = await searchCompanies(domain, fallbackSector, location, fetchCount)
-            if (serperResults.length > 0) {
-                notes.push(`Found ${serperResults.length} results using fallback sector "${fallbackSector}"`)
-                break
-            }
-        }
+    const tracker: { leads: StructuredLead[], strategy: string, status: 'complete' | 'partial' | 'low_confidence' } = { 
+        leads: [], 
+        strategy: 'Strategy generation in progress...',
+        status: 'complete'
     }
 
-    if (serperResults.length === 0) {
-        notes.push('All sectors exhausted — generating AI leads directly...')
-        const synth = await generateSyntheticLeads(domain, sector, location, requestedCount, overallStrategy)
-        return {
-            domain, sector, location, requestedCount,
-            leads: synth,
-            totalFound: synth.length,
-            timestamp: new Date().toISOString(),
-            processingNotes: [...notes, `Generated ${synth.length} AI-synthesised leads.`],
-            overallStrategy
-        }
+    // STEP 0: Circuit Breaker - Hard 100s limit to ensure frontend always gets SOMETHING
+    return Promise.race([
+        executeLeadsLogic(input, location, notes, tracker),
+        new Promise<LeadsResponse>((resolve) => {
+            setTimeout(() => {
+                logger.warn('LeadsPipeline: Hard timeout hit (100s) — returning partial results', { meta: { found: tracker.leads.length } })
+                notes.push(`Hard execution limit (100s) reached. Delivering ${tracker.leads.length} partial results...`)
+                resolve({
+                    domain,
+                    sector: input.sector,
+                    location,
+                    requestedCount,
+                    leads: tracker.leads,
+                    totalFound: tracker.leads.length,
+                    status: 'partial',
+                    overallStrategy: tracker.strategy || 'Strategy generation interrupted due to timeout.',
+                    timestamp: new Date().toISOString(),
+                    processingNotes: notes
+                })
+            }, 100000)
+        })
+    ])
+}
+
+async function executeLeadsLogic(input: LeadsPipelineInput, location: string, notes: string[], tracker: any): Promise<LeadsResponse> {
+    const requestedCount = Number(input.count ?? 10)
+    const { domain, country, city, sessionId } = input
+    
+    // Normalize sector but keep original if it fails
+    const sector = normalizeSector(input.sector) || input.sector
+    if (sector !== input.sector) notes.push(`Sector adjusted: "${input.sector}" → "${sector}"`)
+
+    // STEP 1: Parallelize Strategy Generation and Source Distribution
+    const { groqChatUtility } = await import('../tools/groq.tool')
+    const strategyPrompt = `In 3-4 sentences, describe the best strategy for selling "${domain}" to ${sector} businesses in ${location}. Include: why this market is good, what pain points to target, and best outreach approach.`
+    const strategyPromise = groqChatUtility([
+        { role: 'system', content: 'You are a B2B sales strategist.' },
+        { role: 'user', content: strategyPrompt }
+    ]).then(res => {
+        tracker.strategy = res.content
+        return res
+    }).catch(() => ({ content: '' }))
+
+    const finalSources = [
+        { source: 'google', count: Math.ceil(requestedCount / 4) },
+        { source: 'linkedin', count: Math.ceil(requestedCount / 4) },
+        { source: 'facebook', count: Math.ceil(requestedCount / 4) },
+        { source: 'twitter', count: Math.ceil(requestedCount / 4) }
+    ]
+
+    notes.push(`Balanced source distribution: ${finalSources.map((s: any) => s.source).join(', ')}`)
+    
+    // STEP 2: Parallel Source Fetching (Batches of 2 for safety)
+    const allFoundCompanies: any[] = []
+    const sourceBatches = []
+    for (let i = 0; i < finalSources.length; i += 2) {
+        sourceBatches.push(finalSources.slice(i, i + 2))
     }
 
-    // STEP 3 & 4: Crawl companies
-    notes.push('Scraping company websites...')
-    const crawlerOutput = await runCrawlerAgent({ domain, sector, country, city, serperResults })
-    notes.push(`Successfully scraped ${crawlerOutput.successCount}/${crawlerOutput.totalScraped} sites`)
+    const { searchTargetedLeads } = await import('../tools/serper.tool')
 
-    // STEP 5 & 6: Validate, gap-detect, build structured leads
-    notes.push(`Analyzing leads (need ${requestedCount}, analyzing up to ${fetchCount})...`)
-    const structuredLeads: StructuredLead[] = []
+    const fetchDepthPerSource = finalSources.length >= 4 
+            ? Math.max(5, Math.ceil((requestedCount * 2) / finalSources.length)) 
+            : Math.max(10, Math.ceil((requestedCount * 3) / finalSources.length))
 
-    const analysisPromises = crawlerOutput.companies
-        .filter((c) => c.data !== null)
-        .slice(0, fetchCount)
-        .map(async (companyResult) => {
-            const data = companyResult.data as ExtractedCompanyData
+    for (const batch of sourceBatches) {
+        const batchResults = await Promise.all(batch.map(async (srcConfig) => {
+            const sourceName = srcConfig.source
+            const fetchDepth = sourceName === 'google' ? fetchDepthPerSource * 2 : fetchDepthPerSource
+            
+            logger.info(`LeadsPipeline: fetching from ${sourceName}`, { meta: { sourceName, fetchDepth } })
+            const serperResults = await searchTargetedLeads(`${sector} in ${location}`, sourceName as any, fetchDepth).catch(() => [])
+            
+            if (serperResults.length === 0) return []
 
-            const verdict = await criticValidateCompany(data, domain)
-            if (!verdict.approved) return null
+            const crawlerOutput = await runCrawlerAgent({ 
+                domain, sector, country, city, serperResults,
+                isSocialSource: sourceName !== 'google' 
+            }).catch(() => (({ companies: [] }) as any))
 
-            const analysis = await analyzeBusinessGap(verdict.cleanedData, domain)
-            if (analysis.alreadyUsesDomain) return null
+            const newlyFound = (crawlerOutput.companies || []).map((c: any) => ({
+                ...c,
+                source: sourceName,
+                data: c.data || { companyName: extractNameFromUrl(c.url), emails: [], phones: [], techStack: [], description: '' }
+            }))
 
-            // Build justification block (mandatory per spec)
+            // PROGRESSIVE LOADING: Push to tracker immediately so timeout doesn't return 0
+            newlyFound.forEach((c: any) => {
+                const leadItem: StructuredLead = {
+                    companyName: c.data?.companyName || extractNameFromUrl(c.url),
+                    website: c.url,
+                    sector, country, city: city || '',
+                    decisionMaker: 'Business Contact',
+                    email: c.data?.emails?.[0] || '',
+                    phone: c.data?.phones?.[0] || '',
+                    currentSystem: 'Searching...',
+                    businessGap: 'Analyzing business fit...',
+                    whatToSell: domain,
+                    useCase: '',
+                    salesStrategy: '',
+                    outreachMessage: '',
+                    revenuePotential: '',
+                    techStack: [],
+                    references: [c.url],
+                    justification: { whyTargeted: 'Discovered via search', gapBullets: [], opportunitySummary: 'AWAITING_ANALYSIS' },
+                    confidenceScore: 50,
+                    source: c.source,
+                    scrapedAt: new Date().toISOString(),
+                    verificationStatus: 'unverified' as const
+                }
+                const exists = tracker.leads.some((l: any) => l.website === c.url)
+                if (!exists) tracker.leads.push(leadItem)
+            })
+
+            return newlyFound
+        }))
+        allFoundCompanies.push(...batchResults.flat())
+    }
+
+    // Step 3: Fast Rule-based Validation
+    const validated = await Promise.all(allFoundCompanies.map(async (c) => {
+        const verdict = await criticValidateCompany(c.data, domain, c.source)
+        if (!verdict.approved && c.source === 'google') return null
+        return { ...c, verdict }
+    }))
+    const filterPassed = validated.filter((v): v is any => v !== null)
+
+    // Step 4: Pooled Batch Analysis
+    const allLeads: StructuredLead[] = []
+    const analysisBatches = []
+    const ANALYZE_BATCH_SIZE = 5
+    for (let i = 0; i < filterPassed.length; i += ANALYZE_BATCH_SIZE) {
+        analysisBatches.push(filterPassed.slice(i, i + ANALYZE_BATCH_SIZE))
+    }
+
+    // Await the strategy and first batch of analyses in parallel if possible
+    const [strategyRes] = await Promise.all([strategyPromise])
+    const overallStrategy = strategyRes.content
+
+    for (const batch of analysisBatches) {
+        const analyses = await batchAnalyzeBusinessGaps(batch.map(b => b.verdict.cleanedData), domain).catch(() => [])
+        
+        batch.forEach((b, idx) => {
+            const analysis = analyses[idx]
+            if (!analysis || analysis.alreadyUsesDomain) return
+
             const justification: LeadJustification = {
-                whyTargeted: `${verdict.cleanedData.companyName} is a ${sector} business in ${location} that does not currently use ${domain} — making them an ideal prospect.`,
-                gapBullets: analysis.businessGaps.length > 0
-                    ? analysis.businessGaps
-                    : [`No ${domain} solution detected`, 'Potential manual processes identified'],
-                opportunitySummary: analysis.useCase
+                whyTargeted: `${b.verdict.cleanedData.companyName} is a ${sector} business from ${b.source} in ${location}.`,
+                gapBullets: (analysis.businessGaps && analysis.businessGaps.length > 0) ? analysis.businessGaps : [`Beneficiary of ${domain}`],
+                opportunitySummary: analysis.useCase || 'Strategic B2B fit'
             }
 
             const lead: StructuredLead = {
-                companyName: verdict.cleanedData.companyName || extractNameFromUrl(companyResult.url),
-                website: cleanUrl(companyResult.url) || companyResult.url,
-                sector,
-                country,
-                city: city || '',
-
-                decisionMaker: analysis.decisionMaker,
-                email: verdict.cleanedData.emails[0] || '',
-                phone: verdict.cleanedData.phones[0] || '',
-
-                currentSystem: verdict.cleanedData.techStack.join(', ') || 'Unknown',
-                businessGap: analysis.businessGaps.join('; '),
-                whatToSell: analysis.whatToSell,
-                useCase: analysis.useCase,
-                salesStrategy: analysis.salesStrategy,
-                outreachMessage: analysis.outreachMessage,
-                revenuePotential: analysis.revenuePotential,
-                techStack: verdict.cleanedData.techStack,
-                references: [companyResult.url],
+                companyName: b.verdict.cleanedData.companyName || extractNameFromUrl(b.url),
+                website: b.url,
+                sector, country, city: city || '',
+                decisionMaker: analysis.decisionMaker || 'Head of Department',
+                email: b.verdict.cleanedData.emails?.[0] || '',
+                phone: b.verdict.cleanedData.phones?.[0] || '',
+                currentSystem: b.verdict.cleanedData.techStack?.join(', ') || 'Unknown',
+                businessGap: (analysis.businessGaps || []).join('; '),
+                whatToSell: analysis.whatToSell || domain,
+                useCase: analysis.useCase || '',
+                salesStrategy: analysis.salesStrategy || '',
+                outreachMessage: analysis.outreachMessage || '',
+                revenuePotential: analysis.revenuePotential || '',
+                techStack: b.verdict.cleanedData.techStack || [],
+                references: [b.url],
                 justification,
-                confidenceScore: verdict.confidenceScore,
-                scrapedAt: new Date().toISOString()
+                confidenceScore: b.verdict.confidenceScore,
+                source: b.source,
+                scrapedAt: new Date().toISOString(),
+                verificationStatus: b.data ? 'verified' : 'partially_verified'
             }
-
-            return lead
+            // Enrich or replace the existing progressive lead
+            const existingIdx = tracker.leads.findIndex((l: any) => l.website === b.url)
+            if (existingIdx !== -1) {
+                tracker.leads[existingIdx] = lead
+            } else {
+                tracker.leads.push(lead)
+            }
+            allLeads.push(lead)
         })
-
-    const results = await Promise.allSettled(analysisPromises)
-    for (const r of results) {
-        if (r.status === 'fulfilled' && r.value) structuredLeads.push(r.value)
     }
+    notes.push(`Collected ${allLeads.length} valid leads from parallel sources.`)
 
-    // Sort by confidence score
-    structuredLeads.sort((a, b) => b.confidenceScore - a.confidenceScore)
-    let finalLeads = structuredLeads.slice(0, requestedCount)
+    let finalLeads = allLeads.slice(0, requestedCount)
 
     // Pad with LLM-synthesised leads if scraping didn't yield enough
     if (finalLeads.length < requestedCount) {
@@ -185,6 +269,34 @@ export async function runLeadsPipeline(input: LeadsPipelineInput): Promise<Leads
         notes.push(`Scraping yielded ${finalLeads.length}/${requestedCount} leads — generating ${needed} additional via AI synthesis...`)
         const padded = await generateSyntheticLeads(domain, sector, location, needed, overallStrategy)
         finalLeads = [...finalLeads, ...padded].slice(0, requestedCount)
+    }
+    
+    // --- RELIABILITY FALLBACK: If 0 validated leads, return raw search results ---
+    if (finalLeads.length === 0 && allFoundCompanies.length > 0) {
+        notes.push('Strict filters yielded 0 results — falling back to raw search results for continuity.')
+        finalLeads = allFoundCompanies.slice(0, 10).map(c => ({
+            companyName: c.data?.companyName || extractNameFromUrl(c.url),
+            website: c.url,
+            sector, country, city: city || '',
+            decisionMaker: 'Business Contact',
+            email: c.data?.emails?.[0] || '',
+            phone: c.data?.phones?.[0] || '',
+            currentSystem: 'Unknown',
+            businessGap: 'Potential target discovered via multi-source search.',
+            whatToSell: domain,
+            useCase: `Business in ${sector} sector that might need ${domain}.`,
+            salesStrategy: 'Standard direct outreach',
+            outreachMessage: `Hello, we noticed your business in the ${sector} sector and believe ${domain} could be a great fit.`,
+            revenuePotential: 'N/A',
+            techStack: c.data?.techStack || [],
+            references: [c.url],
+            justification: { whyTargeted: 'Discovery search match', gapBullets: ['Unverified status'], opportunitySummary: 'Raw search result' },
+            confidenceScore: 40,
+            source: c.source,
+            scrapedAt: new Date().toISOString(),
+            verificationStatus: 'unverified' as const
+        }))
+        tracker.status = 'low_confidence'
     }
 
     notes.push(`Returning ${finalLeads.length}/${requestedCount} leads`)
@@ -197,6 +309,7 @@ export async function runLeadsPipeline(input: LeadsPipelineInput): Promise<Leads
         requestedCount,
         leads: finalLeads,
         totalFound: finalLeads.length,
+        status: (tracker.status as any) || 'complete',
         timestamp: new Date().toISOString(),
         processingNotes: notes,
         overallStrategy
@@ -224,9 +337,10 @@ Domain rules (STRICT):
 - Phone numbers must match country dialling codes (Pakistan +92, UAE +971, UK +44, USA +1, India +91, etc.)
 - Email format: info@, hello@, or contact@ + actual domain (never @gmail.com or @example.com)`
 
-        const raw = await groqComplete(
-            'You are a B2B lead generation expert. Respond ONLY with valid JSON.',
-            `Generate ${count} realistic ${sector} business leads in ${location} that would benefit from "${domain}".
+        const { groqChatUtility } = await import('../tools/groq.tool')
+        const message = await groqChatUtility([
+            { role: 'system', content: 'You are a B2B lead generation expert. Respond ONLY with valid JSON.' },
+            { role: 'user', content: `Generate ${count} realistic ${sector} business leads in ${location} that would benefit from "${domain}".
 
 Context strategy: ${strategy.slice(0, 200)}
 Country: ${country}
@@ -248,9 +362,10 @@ Return ONLY a JSON array of ${count} objects:
   "revenuePotential": "$X,000/year",
   "techStack": ["tech1", "tech2"],
   "confidenceScore": 70
-}]`,
-            { temperature: 0.7, maxTokens: Math.min(count * 450, 8000) }
-        )
+}]` }
+        ], { temperature: 0.7, maxTokens: Math.min(count * 450, 8000) })
+
+        const raw = message.content
 
         const match = raw.match(/\[[\s\S]*\]/)
         if (!match) return []
@@ -287,7 +402,9 @@ Return ONLY a JSON array of ${count} objects:
                     opportunitySummary: p.useCase || ''
                 },
                 confidenceScore: Number(p.confidenceScore) || 65,
-                scrapedAt: new Date().toISOString()
+                source: 'ai',
+                scrapedAt: new Date().toISOString(),
+                verificationStatus: 'partially_verified'
             }
             return lead
         })

@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
+import { Virtuoso, VirtuosoHandle } from 'react-virtuoso'
 import { useStore } from '../../store/useStore'
 import { MessageBubble } from './MessageBubble'
 import { InputBar } from './InputBar'
@@ -7,15 +8,32 @@ import { OrchestratorOutput } from '../../types'
 import { Zap } from 'lucide-react'
 
 export function ChatInterface() {
-  const { mode, sessionId, leadsForm, addUserMessage, addLoadingMessage, resolveMessage, setMessageError, isLoading, setLoading, getMessagesForMode } = useStore()
+  const { 
+    mode, 
+    sessionId, 
+    leadsForm, 
+    addUserMessage, 
+    addLoadingMessage, 
+    resolveMessage, 
+    setMessageError, 
+    setLoading, 
+    getMessagesForMode,
+    setActiveVersion,
+    queueRequest
+  } = useStore()
+  
   const visibleMessages = getMessagesForMode(mode)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
   const [injectedQuery, setInjectedQuery] = useState('')
 
-  // Auto-scroll to bottom when new messages arrive
+  // Handle version switching
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [visibleMessages])
+    const handler = (e: CustomEvent<{ parentId: string, versionIndex: number }>) => {
+        setActiveVersion(e.detail.parentId, e.detail.versionIndex)
+    }
+    document.addEventListener('switch-version', handler as EventListener)
+    return () => document.removeEventListener('switch-version', handler as EventListener)
+  }, [setActiveVersion])
 
   // Handle suggestion clicks
   useEffect(() => {
@@ -24,93 +42,142 @@ export function ChatInterface() {
     return () => document.removeEventListener('inject-query', handler as EventListener)
   }, [])
 
-  const handleSubmit = async (query: string) => {
-    if (isLoading) return
+  const handleSubmit = useCallback(async (query: string, parentMessageId?: string, versionIndex?: number) => {
+    const currentController = new AbortController()
 
-    addUserMessage(query)
-    const loadingId = addLoadingMessage()
+    addUserMessage(query, parentMessageId, versionIndex)
+    const loadingId = addLoadingMessage(currentController, parentMessageId, versionIndex)
+    
+    // If it's a new version, immediately set it as active
+    if (parentMessageId && versionIndex) {
+        setActiveVersion(parentMessageId, versionIndex)
+    }
+
     setLoading(true)
 
-    try {
-      const result: OrchestratorOutput = await sendChat({
-        sessionId,
-        query,
-        mode,
-        ...(mode === 'leads' ? {
-          domain: leadsForm.domain || undefined,
-          sector: leadsForm.sector || undefined,
-          country: leadsForm.country || undefined,
-          city: leadsForm.city || undefined,
-          count: leadsForm.count
-        } : {})
-      })
+    // Parallel Queue Integration
+    queueRequest(async () => {
+        try {
+          const result: OrchestratorOutput = await sendChat({
+            sessionId,
+            query,
+            mode,
+            ...(mode === 'leads' ? {
+              domain: leadsForm.domain || undefined,
+              sector: leadsForm.sector || undefined,
+              country: leadsForm.country || undefined,
+              city: leadsForm.city || undefined,
+              count: leadsForm.count
+            } : {})
+          }, currentController.signal)
+    
+          resolveMessage(loadingId, result)
+        } catch (err: any) {
+          if (err.name === 'AbortError') return
+          const msg = err instanceof Error ? err.message : 'Request failed. Please try again.'
+          setMessageError(loadingId, msg)
+        } finally {
+          if (Object.keys(useStore.getState().abortControllers).length === 0) {
+              setLoading(false)
+          }
+        }
+    })
+  }, [mode, sessionId, leadsForm, addUserMessage, addLoadingMessage, setLoading, resolveMessage, setMessageError, setActiveVersion, queueRequest])
 
-      resolveMessage(loadingId, result)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Request failed. Check your API keys and try again.'
-      setMessageError(loadingId, msg)
-    } finally {
-      setLoading(false)
+  // Handle edit message events
+  useEffect(() => {
+    const handler = (e: CustomEvent<{ content: string, parentMessageId: string, versionIndex: number }>) => {
+        handleSubmit(e.detail.content, e.detail.parentMessageId, e.detail.versionIndex)
     }
-  }
+    document.addEventListener('edit-message', handler as EventListener)
+    return () => document.removeEventListener('edit-message', handler as EventListener)
+  }, [handleSubmit])
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    if (visibleMessages.length > 0) {
+      virtuosoRef.current?.scrollToIndex({
+        index: visibleMessages.length - 1,
+        behavior: 'smooth'
+      })
+    }
+  }, [visibleMessages.length])
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
-        {visibleMessages.length === 0 && <EmptyState />}
-        {visibleMessages.map((msg) => (
-          <MessageBubble key={msg.id} message={msg} />
-        ))}
-        <div ref={bottomRef} />
+    <div className="flex flex-col h-full bg-gray-950">
+      <div className="flex-1 min-h-0">
+        <Virtuoso
+          ref={virtuosoRef}
+          data={visibleMessages}
+          initialTopMostItemIndex={visibleMessages.length - 1}
+          components={{
+            Header: () => visibleMessages.length === 0 ? <EmptyState /> : <div className="h-6" />,
+            Footer: () => <div className="h-6" />,
+          }}
+          itemContent={(_, msg) => (
+            <div className="px-6 py-3">
+               <MessageBubble message={msg} />
+            </div>
+          )}
+        />
       </div>
 
-      {/* Input */}
-      <InputBar onSubmit={handleSubmit} disabled={isLoading} injectedQuery={injectedQuery} onInjectedConsumed={() => setInjectedQuery('')} />
+      <div className="p-4 border-t border-gray-800/50 bg-gray-900/30 backdrop-blur-sm">
+        <InputBar 
+          onSubmit={handleSubmit} 
+          injectedQuery={injectedQuery} 
+          onInjectedConsumed={() => setInjectedQuery('')} 
+        />
+      </div>
     </div>
   )
 }
 
 const MODE_META = {
   chat: {
-    title: 'Chat',
-    description: 'Have a normal conversation. Ask anything, get direct answers.',
-    suggestions: ['Hello! How are you?', 'What can you help me with?', 'Tell me something interesting about AI']
+    title: 'General Chat',
+    description: 'Casual conversation and direct answers.',
+    suggestions: ['Hello! How are you?', 'What can you help me with?', 'Help me write a professional email']
   },
   learning: {
-    title: 'Research & Learning Engine',
-    description: 'Deep research on any topic — explanations, examples, papers, videos, and news all in one response.',
-    suggestions: ['Explain how transformers work in AI', 'What is retrieval augmented generation?', 'How does blockchain consensus work?']
+    title: 'Research & Learning',
+    description: 'Deep explanations, papers, and educational resources.',
+    suggestions: ['Explain Quantum Computing', 'How do neural networks learn?', 'Latest news in Space exploration']
   },
   leads: {
-    title: 'Lead Intelligence Engine',
-    description: 'Find qualified business leads, extract contact info, detect gaps, and generate personalized outreach.',
-    suggestions: ['Find restaurant owners in Dubai who need AI tools', 'Healthcare clinics in USA needing CRM software', 'E-commerce stores in UK without SEO services']
+    title: 'Lead Intelligence',
+    description: 'B2B lead generation and market scouting.',
+    suggestions: ['Find tech companies in Berlin', 'Real estate agencies in Dubai', 'Medical clinics in USA']
   },
   auto: {
-    title: 'AI Platform',
-    description: "Type anything — I'll detect if you want to chat, learn, or find leads and route automatically.",
-    suggestions: ['Hello, how are you?', 'Explain machine learning in simple terms', 'Find fintech leads in UAE']
+    title: 'Omni-Assistant (Auto)',
+    description: 'Intelligent routing across all modules.',
+    suggestions: ['Find React jobs', 'Explain RAG in AI', 'Find CRM leads for doctors']
+  },
+  'job-hunter': {
+    title: 'Career & Jobs',
+    description: 'Verified job discovery and career intelligence.',
+    suggestions: ['Find Remote React jobs', 'Senior Backend Engineer salary', 'Review my career goals']
   }
 }
 
 function EmptyState() {
   const { mode } = useStore()
-  const meta = MODE_META[mode]
+  const meta = MODE_META[mode] || MODE_META.chat
 
   return (
-    <div className="flex flex-col items-center justify-center h-full py-12 text-center">
-      <div className="w-14 h-14 rounded-2xl bg-brand-600/20 border border-brand-600/30 flex items-center justify-center mb-4">
-        <Zap className="w-7 h-7 text-brand-400" />
+    <div className="flex flex-col items-center justify-center min-h-[60vh] py-12 text-center px-6">
+      <div className="w-16 h-16 rounded-2xl bg-brand-600/10 border border-brand-600/20 flex items-center justify-center mb-6">
+        <Zap className="w-8 h-8 text-brand-400" />
       </div>
-      <h2 className="text-xl font-semibold text-white mb-2">{meta.title}</h2>
-      <p className="text-gray-500 text-sm max-w-md mb-8">{meta.description}</p>
+      <h2 className="text-2xl font-bold text-white mb-2">{meta.title}</h2>
+      <p className="text-gray-400 text-sm max-w-sm mb-10 leading-relaxed">{meta.description}</p>
 
-      <div className="grid gap-2 w-full max-w-lg">
-        {meta.suggestions.map((s) => (
+      <div className="grid gap-3 w-full max-w-md">
+        {meta.suggestions.map((s: string) => (
           <button key={s}
             onClick={() => document.dispatchEvent(new CustomEvent('inject-query', { detail: s }))}
-            className="text-left px-4 py-2.5 rounded-xl bg-gray-800 hover:bg-gray-750 border border-gray-700 hover:border-brand-600 text-sm text-gray-400 hover:text-white transition-all">
+            className="text-left px-5 py-3 rounded-xl bg-gray-800/50 hover:bg-gray-800 border border-gray-700/50 hover:border-brand-600/50 text-sm text-gray-400 hover:text-white transition-all">
             {s}
           </button>
         ))}

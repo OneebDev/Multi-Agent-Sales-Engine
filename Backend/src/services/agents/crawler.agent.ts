@@ -1,6 +1,7 @@
 import { scrapeMultiple, ScrapeResult } from '../tools/scraper.tool'
 import { searchCompanies, SerperResult } from '../tools/serper.tool'
 import { validateUrl } from '../scraper/validator'
+import { checkLiveness } from '../scraper/html-parser'
 import logger from '../../handlers/logger'
 
 export interface CrawlerInput {
@@ -9,6 +10,7 @@ export interface CrawlerInput {
     country: string
     city?: string
     serperResults?: SerperResult[]
+    isSocialSource?: boolean
 }
 
 export interface CrawlerOutput {
@@ -29,35 +31,56 @@ export async function runCrawlerAgent(input: CrawlerInput): Promise<CrawlerOutpu
     }
 
     // 2. Extract and filter valid URLs
-    const urls = searchResults
+    const initialUrls = searchResults
         .map((r) => r.link)
         .filter(validateUrl)
         .filter((url) => {
+            if (input.isSocialSource) return true // Allow if we specifically target social
             const host = new URL(url).hostname.toLowerCase()
             // Exclude aggregators, social, and directories
-            const excluded = ['linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com', 'yelp.com', 'yellowpages.com', 'indeed.com', 'glassdoor.com']
+            const excluded = ['linkedin.com', 'facebook.com', 'twitter.com', 'instagram.com', 'yelp.com', 'yellowpages.com', 'indeed.com', 'glassdoor.com', 'youtube.com', 'vimeo.com']
             return !excluded.some((e) => host.includes(e))
         })
-        // Deduplicate by hostname
+        // Deduplicate by URL for social, or hostname for web
         .filter((url, _, arr) => {
-            const host = new URL(url).hostname
-            return arr.findIndex((u) => new URL(u).hostname === host) === arr.indexOf(url)
+            try {
+                if (input.isSocialSource) return arr.indexOf(url) === arr.lastIndexOf(url) || arr.indexOf(url) === arr.indexOf(url) // Basic dedupe
+                const host = new URL(url).hostname
+                return arr.findIndex((u) => new URL(u).hostname === host) === arr.indexOf(url)
+            } catch { return false }
         })
-        .slice(0, 30)
+        .slice(0, 100) // 4x Depth: Large pool for candidates
 
-    logger.info('CrawlerAgent: scraping', { meta: { urlCount: urls.length } })
+    logger.info('CrawlerAgent: checking liveness of domains', { meta: { initialCount: initialUrls.length } })
+    
+    // 3. Batch liveness check (Stricter filtering)
+    const livenessResults = await Promise.allSettled(initialUrls.map(url => checkLiveness(url, 5000)))
+    const liveUrls: string[] = []
+    
+    for (const res of livenessResults) {
+        if (res.status === 'fulfilled' && res.value.live) {
+            liveUrls.push(res.value.url)
+        }
+    }
 
-    // 3. Scrape all URLs concurrently (respects CONCURRENCY config)
-    const companies = await scrapeMultiple(urls)
+    // Target a specific number of companies if requested (default 15)
+    // We fetch a few extra to account for scraping failures
+    const finalUrls = liveUrls.slice(0, 20) 
 
-    const successCount = companies.filter((c) => c.valid).length
-    const failureCount = companies.length - successCount
+    logger.info('CrawlerAgent: scraping live domains', { meta: { urlCount: finalUrls.length } })
 
-    logger.info('CrawlerAgent: complete', { meta: { total: companies.length, success: successCount, failures: failureCount } })
+    // 4. Scrape all URLs concurrently (respects CONCURRENCY config)
+    const companiesResults = await scrapeMultiple(finalUrls)
+    const validCompanies = companiesResults.filter((c) => c.valid)
+
+    const successCount = validCompanies.length
+    const failureCount = companiesResults.length - successCount
+
+    logger.info('CrawlerAgent: complete', { meta: { total: companiesResults.length, success: successCount, failures: failureCount } })
 
     return {
-        companies: companies.filter((c) => c.valid),
-        totalScraped: companies.length,
+        companies: validCompanies,
+        totalScraped: companiesResults.length,
         successCount,
         failureCount
     }

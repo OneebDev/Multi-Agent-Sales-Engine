@@ -15,6 +15,8 @@ export interface GroqResponse {
 
 // ─── Key rotation pool ────────────────────────────────────────────────────────
 
+const UTILITY_MODEL = 'llama-3.1-8b-instant'
+
 // Tracks which keys are rate-limited and when they reset
 interface KeyState {
     key: string
@@ -30,7 +32,8 @@ function getKeyPool(): KeyState[] {
     const keys = [
         config.AI.GROQ_API_KEY,
         config.AI.GROQ_API_KEY_2,
-        config.AI.GROQ_API_KEY_3
+        config.AI.GROQ_API_KEY_3,
+        config.AI.GROQ_API_KEY_4
     ].filter(Boolean)
     if (keys.length === 0) throw new Error('No GROQ_API_KEY configured')
     _keyPool = keys.map((key) => ({ key, rateLimitedUntil: 0 }))
@@ -84,62 +87,97 @@ function parseWaitMs(errMsg: string): number {
 
 // ─── Core chat function with auto key rotation ────────────────────────────────
 
-export async function groqChat(messages: GroqMessage[], opts: { temperature?: number; maxTokens?: number } = {}): Promise<GroqResponse> {
-    const { temperature = 0.7, maxTokens = 4096 } = opts
+export async function groqChat(
+    messages: GroqMessage[], 
+    options: { temperature?: number; maxTokens?: number; model?: string } = {}
+): Promise<GroqMessage> {
+    const targetModels = options.model 
+        ? [options.model] 
+        : [config.AI.GROQ_MODEL, ...config.AI.GROQ_FALLBACK_MODELS, UTILITY_MODEL]
+    const pool = getKeyPool()
+    const poolSize = pool.length
 
-    const MAX_ATTEMPTS = getKeyPool().length
+    // Nested Rotation: For each model, try all available keys round-robin
+    for (const targetModel of targetModels) {
+        logger.info(`Groq: Attempting with model ${targetModel}`)
 
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-        const keyState = pickAvailableKey()
+        for (let attempt = 0; attempt < poolSize; attempt++) {
+            const keyState = pickAvailableKey()
 
-        if (!keyState) {
-            // All keys exhausted — find the one that resets soonest
-            const pool = getKeyPool()
-            const soonest = pool.reduce((a, b) => a.rateLimitedUntil < b.rateLimitedUntil ? a : b)
-            const waitSec = Math.ceil((soonest.rateLimitedUntil - Date.now()) / 1000)
-            const mins = Math.floor(waitSec / 60)
-            const secs = waitSec % 60
-            const waitStr = mins > 0 ? `${mins}m${secs}s` : `${secs}s`
-            throw new Error(`All API keys are rate-limited — please try again in ${waitStr}.`)
-        }
-
-        const client = getClientForKey(keyState.key)
-
-        try {
-            const completion = await client.chat.completions.create({
-                model: config.AI.GROQ_MODEL,
-                messages,
-                temperature,
-                max_tokens: maxTokens
-            })
-
-            const choice = completion.choices[0]
-            return {
-                content: choice.message.content || '',
-                usage: {
-                    promptTokens: completion.usage?.prompt_tokens || 0,
-                    completionTokens: completion.usage?.completion_tokens || 0
-                },
-                model: completion.model
-            }
-        } catch (err) {
-            const errMsg = err instanceof Error ? err.message : String(err)
-            const isRateLimit = errMsg.includes('429') || errMsg.includes('rate_limit_exceeded')
-
-            if (isRateLimit) {
-                const waitMs = parseWaitMs(errMsg)
-                markKeyRateLimited(keyState.key, waitMs)
-                // Loop continues — tries next available key
+            if (!keyState) {
+                // Smart Staggered Backoff (v10): 
+                // Incremental wait to avoid hammering while maintaining speed
+                const backoff = attempt === 0 ? 100 : attempt === 1 ? 300 : 800
+                const jitter = Math.random() * 200
+                await new Promise(r => setTimeout(r, backoff + jitter))
                 continue
             }
 
-            logger.error('Groq chat failed (non-rate-limit)', { meta: err })
-            throw err
+            const client = getClientForKey(keyState.key)
+
+            try {
+                const completion = await client.chat.completions.create({
+                    model: targetModel,
+                    messages,
+                    temperature: options.temperature ?? 0.7,
+                    max_tokens: options.maxTokens ?? 1024
+                })
+
+                const choice = completion.choices[0]
+                return {
+                    role: 'assistant',
+                    content: choice.message.content || ''
+                }
+            } catch (err) {
+                const errMsg = err instanceof Error ? err.message : String(err)
+                const isRateLimit = errMsg.includes('429') || errMsg.includes('rate_limit_exceeded')
+
+                if (isRateLimit) {
+                    const waitMs = parseWaitMs(errMsg)
+                    markKeyRateLimited(keyState.key, waitMs)
+                    logger.warn(`Groq: Key rotation fallback from ...${keyState.key.slice(-6)} on ${targetModel} due to rate limit.`)
+                    continue
+                }
+
+                logger.error('Groq chat failed (non-rate-limit)', { meta: err })
+                throw err
+            }
         }
     }
 
-    // Should not reach here, but satisfy TypeScript
-    throw new Error('All API keys are rate-limited — please try again later.')
+    // If we reached here, ALL models and ALL keys failed
+    logger.error('GroqPool: TOTAL EXHAUSTION. All models and keys rate-limited.', { meta: { messagesCount: messages.length } })
+    
+    // Final desperate retry with utility model - shorter wait to avoid 504
+    await new Promise(r => setTimeout(r, 1000))
+    try {
+        const apiKeys = pool.map(p => p.key)
+        const groq = new Groq({ apiKey: apiKeys[0] })
+        const res = await groq.chat.completions.create({
+            model: UTILITY_MODEL,
+            messages,
+            temperature: options.temperature ?? 0.7,
+            max_tokens: options.maxTokens ?? 1024
+        })
+        const content = res.choices[0]?.message?.content || ''
+        return { role: 'assistant', content }
+    } catch {
+        throw new Error('AI Engine is currently at maximum capacity. Please wait 30-60 seconds and try again (Prevents Gateway Timeout).')
+    }
+}
+
+/**
+ * Utility version of groqChat — uses 8b model by default for high RPM tasks (routing/intent)
+ */
+export async function groqChatUtility(
+    messages: GroqMessage[],
+    options: { temperature?: number; maxTokens?: number } = {}
+): Promise<GroqMessage> {
+    return groqChat(messages, { 
+        ...options, 
+        model: UTILITY_MODEL,
+        maxTokens: options.maxTokens ?? 512 
+    })
 }
 
 export async function groqComplete(systemPrompt: string, userPrompt: string, opts: { temperature?: number; maxTokens?: number } = {}): Promise<string> {
@@ -170,27 +208,93 @@ Return ONLY a JSON array of 3 strings. No explanation. Example: ["query1", "quer
     return [query]
 }
 
-export async function detectIntent(query: string): Promise<{ mode: 'learning' | 'leads' | 'chat' | 'mixed'; confidence: number; reasoning: string }> {
-    const prompt = `Classify this user query. Understand all languages including English, Urdu, Roman Urdu, and mixed. Respond with ONLY valid JSON.
+export interface IntentResult {
+    mode: 'learning' | 'leads' | 'chat' | 'job-hunter' | 'auto' | 'mixed'
+    confidence: number
+    secondary_intent?: string
+    reasoning: string
+}
 
+export async function detectIntent(query: string): Promise<IntentResult> {
+    const prompt = `You are a high-precision Intent Engine. Analyze this user query (any language: English, Urdu, Roman Urdu like "kaise ho", "job dhundo", or Mixed).
 Query: "${query}"
 
-Rules:
-- "learning": asking to learn, explain, research, understand, find information, aik topic samjhao, research karo
-- "leads": asking to find companies, businesses, generate leads, find clients, sales prospects, leads chahiye, companies dhundho
-- "chat": casual conversation, greetings, small talk, general questions without research need, normal baat cheet
-- "mixed": combination of learning and leads
+Categories:
+- "learning": Research, explanations, educational papers, videos (e.g. "explain X", "what is Y", "samjhao").
+- "leads": Finding companies, sales prospects, business profiles (e.g. "find tech companies", "hospital leads", "bizness dhundo").
+- "chat": Casual conversation, greetings, small talk (e.g. "hi", "how are you", "kaise ho").
+- "job-hunter": Job search, career advice, salary info, resume help (e.g. "software jobs", "salary in London", "career roadmap").
+- "mixed": Multiple specific categories involved.
 
-JSON format: {"mode": "learning|leads|chat|mixed", "confidence": 0.0-1.0, "reasoning": "brief reason"}`
+Return ONLY valid JSON:
+{
+  "mode": "learning|leads|chat|job-hunter|mixed",
+  "confidence": number 0.0-1.0,
+  "secondary_intent": "optional specific detail or null",
+  "reasoning": "brief explanation (recognize Roman Urdu if present)"
+}`
 
     try {
-        const raw = await groqComplete('You are an intent classifier. Respond with ONLY valid JSON.', prompt, { temperature: 0.2, maxTokens: 150 })
+        const raw = await groqComplete('You are a production-grade Intent Engine. Respond with ONLY valid JSON.', prompt, { temperature: 0.1, maxTokens: 250 })
         const match = raw.match(/\{[\s\S]*?\}/)
         if (match) {
-            return JSON.parse(match[0]) as { mode: 'learning' | 'leads' | 'chat' | 'mixed'; confidence: number; reasoning: string }
+            const parsed = JSON.parse(match[0])
+            return {
+                mode: parsed.mode || 'chat',
+                confidence: parsed.confidence || 0.5,
+                secondary_intent: parsed.secondary_intent || undefined,
+                reasoning: parsed.reasoning || 'No reasoning provided'
+            }
         }
-    } catch {
-        // default
+    } catch (err) {
+        logger.error('Intent detection failed', { meta: err })
     }
-    return { mode: 'chat', confidence: 0.5, reasoning: 'Could not classify, defaulting to chat' }
+    return { mode: 'chat', confidence: 0.5, reasoning: 'Defaulting to chat due to error' }
+}
+// ─── Consolidated Fast Router ────────────────────────────────────────────────
+export interface RouterResult extends IntentResult {
+    domain?: string
+    sector?: string
+    country?: string
+    city?: string
+    count?: number
+}
+
+export async function runConsolidatedRouter(query: string): Promise<RouterResult> {
+    const prompt = `You are a high-precision Intent & Entity Engine. Analyze this user query.
+Query: "${query}"
+
+Categories:
+- "learning": Research, explanations, papers, videos.
+- "leads": Finding companies, sales prospects, business profiles.
+- "chat": Casual conversation, greetings, small talk.
+- "job-hunter": Job search, career advice, salary info.
+- "mixed": Multiple specific categories.
+
+If "leads", also extract (if present):
+- "domain": Product/service they sell.
+- "sector": Industry they target.
+- "country": Target country.
+- "city": Target city.
+
+Return ONLY valid JSON:
+{
+  "mode": "learning|leads|chat|job-hunter|mixed",
+  "confidence": number,
+  "reasoning": "brief explanation",
+  "domain": "string or null",
+  "sector": "string or null",
+  "country": "string or null",
+  "city": "string or null",
+  "count": number or null
+}`
+
+    try {
+        const raw = await groqComplete('You are a production-grade router. Respond with ONLY valid JSON.', prompt, { temperature: 0.1, maxTokens: 500 })
+        const match = raw.match(/\{[\s\S]*?\}/)
+        if (match) return JSON.parse(match[0])
+    } catch (err) {
+        logger.error('Router failed', { meta: err })
+    }
+    return { mode: 'chat', confidence: 0.5, reasoning: 'Defaulting to chat due to error' }
 }

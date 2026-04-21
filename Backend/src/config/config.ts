@@ -31,7 +31,9 @@ export default {
         GROQ_API_KEY: process.env.GROQ_API_KEY as string,
         GROQ_API_KEY_2: process.env.GROQ_API_KEY_2 || '',
         GROQ_API_KEY_3: process.env.GROQ_API_KEY_3 || '',
+        GROQ_API_KEY_4: process.env.GROQ_API_KEY_4 || '',
         GROQ_MODEL: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+        GROQ_FALLBACK_MODELS: (process.env.GROQ_FALLBACK_MODELS || 'mixtral-8x7b-32768,llama-3.1-70b-versatile,llama3-70b-8192').split(','),
 
         SERPER_API_KEY: process.env.SERPER_API_KEY as string,
         YOUTUBE_API_KEY: process.env.YOUTUBE_API_KEY as string,
@@ -49,9 +51,9 @@ export default {
         },
 
         SCRAPER: {
-            TIMEOUT_MS: parseInt(process.env.SCRAPER_TIMEOUT_MS || '15000', 10),
-            MAX_RETRIES: parseInt(process.env.SCRAPER_MAX_RETRIES || '3', 10),
-            CONCURRENCY: parseInt(process.env.SCRAPER_CONCURRENCY || '5', 10)
+            TIMEOUT_MS: parseInt(process.env.SCRAPER_TIMEOUT_MS || '7000', 10),
+            MAX_RETRIES: parseInt(process.env.SCRAPER_MAX_RETRIES || '0', 10),
+            CONCURRENCY: parseInt(process.env.SCRAPER_CONCURRENCY || '10', 10)
         },
 
         ALLOWED_ORIGINS: (process.env.ALLOWED_ORIGINS || 'http://localhost:5173,http://localhost:3000').split(',')

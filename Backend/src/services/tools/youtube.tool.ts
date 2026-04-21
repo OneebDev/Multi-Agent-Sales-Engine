@@ -33,7 +33,7 @@ interface YouTubeDetailsItem {
     contentDetails?: { duration?: string }
 }
 
-export async function searchYouTube(query: string, maxResults = 5): Promise<YouTubeVideo[]> {
+export async function searchYouTube(query: string, maxResults = 15): Promise<YouTubeVideo[]> {
     if (!config.AI.YOUTUBE_API_KEY) {
         logger.warn('YOUTUBE_API_KEY not configured — skipping YouTube search')
         return []

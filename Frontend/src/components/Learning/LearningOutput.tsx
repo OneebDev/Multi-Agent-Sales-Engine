@@ -8,11 +8,18 @@ interface Props {
 }
 
 export function LearningOutput({ data }: Props) {
-  const { references: refs, requestedCounts, notes } = data
+  if (!data) return null
+  
+  const { 
+    references: refs = { articles: [], videos: [], papers: [], news: [] }, 
+    requestedCounts = {} as NonNullable<LearningResponse['requestedCounts']>, 
+    notes = [] 
+  } = data
+  
   return (
     <div className="space-y-6 text-sm">
       {/* Shortfall / info notes */}
-      {notes?.length > 0 && (
+      {notes && notes.length > 0 && (
         <div className="rounded-xl border border-yellow-700/40 bg-yellow-900/10 px-4 py-3 space-y-1">
           {notes.map((n, i) => (
             <div key={i} className="flex items-start gap-2">
@@ -57,7 +64,7 @@ export function LearningOutput({ data }: Props) {
 
       {/* References */}
       <div className="space-y-4">
-        {refs.videos.length > 0 && (
+        {refs.videos && refs.videos.length > 0 && (
           <RefSection
             icon={<Video className="w-4 h-4 text-red-400" />}
             title="Videos"
@@ -67,7 +74,7 @@ export function LearningOutput({ data }: Props) {
             {refs.videos.map((v, i) => <VideoCard key={i} video={v} />)}
           </RefSection>
         )}
-        {refs.articles.length > 0 && (
+        {refs.articles && refs.articles.length > 0 && (
           <RefSection
             icon={<FileText className="w-4 h-4 text-blue-400" />}
             title="Articles"
@@ -77,7 +84,7 @@ export function LearningOutput({ data }: Props) {
             {refs.articles.map((a, i) => <ArticleCard key={i} article={a} />)}
           </RefSection>
         )}
-        {refs.papers.length > 0 && (
+        {refs.papers && refs.papers.length > 0 && (
           <RefSection
             icon={<BookMarked className="w-4 h-4 text-purple-400" />}
             title="Research Papers"
@@ -87,7 +94,7 @@ export function LearningOutput({ data }: Props) {
             {refs.papers.map((p, i) => <PaperCard key={i} paper={p} />)}
           </RefSection>
         )}
-        {refs.news.length > 0 && (
+        {refs.news && refs.news.length > 0 && (
           <RefSection
             icon={<Newspaper className="w-4 h-4 text-green-400" />}
             title="News"

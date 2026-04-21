@@ -15,9 +15,12 @@ const ROMAN_URDU_WORDS = new Set([
     'theek', 'nahi', 'nahin', 'bilkul', 'accha', 'acha', 'zaroor', 'lekin', 'leken',
     'par', 'aur', 'ya', 'matlab', 'samjhao', 'batao', 'dekho', 'yaar', 'bhai',
     'dost', 'shukriya', 'shukria', 'meherbani', 'please', 'btao', 'bta', 'kr',
-    'karo', 'chahiye', 'chahye', 'lagta', 'pata', 'nahi', 'thoda', 'bohot', 'bahut',
+    'karo', 'chahiye', 'chahye', 'lagta', 'pata', 'thoda', 'bohot', 'bahut',
     'zyada', 'zada', 'wala', 'walay', 'kuch', 'koi', 'sab', 'sirf', 'bas',
-    'abhi', 'kal', 'aj', 'aaj', 'raat', 'din', 'waqt', 'time', 'help', 'karein'
+    'abhi', 'kal', 'aj', 'aaj', 'raat', 'din', 'waqt', 'time', 'help', 'karein',
+    'karna', 'karne', 'baat', 'dikhao', 'chaiye', 'chahie', 'nikalo', 'nikaali',
+    'dhundo', 'dhund', 'dhondo', 'clients', 'customers', 'leads', 'business',
+    'market', 'sales', 'bechna', 'becho', 'paisay', 'paise', 'paisa', 'kam'
 ])
 
 export function detectLanguage(text: string): DetectedLanguage {
@@ -29,8 +32,8 @@ export function detectLanguage(text: string): DetectedLanguage {
 
     if (hasUrduScript && romanUrduRatio > 0.1) return 'mixed'
     if (hasUrduScript) return 'urdu'
-    if (romanUrduRatio >= 0.2) return 'roman-urdu'
-    if (romanUrduRatio > 0.05) return 'mixed'
+    if (romanUrduRatio >= 0.12) return 'roman-urdu'
+    if (romanUrduRatio > 0.04) return 'mixed'
     return 'english'
 }
 

@@ -35,7 +35,7 @@ export async function runNormalChat(sessionId: string, query: string): Promise<N
 
     const res = await groqChat(history, { temperature: 0.8, maxTokens: 2048 })
 
-    addMessage(sessionId, 'assistant', res.content, 'mixed')
+    addMessage(sessionId, 'assistant', res.content, 'chat')
 
     return {
         reply: res.content,

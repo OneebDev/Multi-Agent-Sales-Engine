@@ -22,9 +22,12 @@ export interface LeadAnalysis {
     decisionMaker: string
 }
 
-export async function criticValidateCompany(data: ExtractedCompanyData, _domain: string): Promise<CriticVerdict> {
+export async function criticValidateCompany(data: ExtractedCompanyData, _domain: string, source: string = 'google'): Promise<CriticVerdict> {
     const hallucinations: string[] = []
     const warnings: string[] = []
+
+    const isSocial = source !== 'google'
+    if (isSocial) logger.info('CriticAgent: validating social lead', { meta: { source } })
 
     // Rule-based validation
     const cleanedEmails = data.emails.filter(isValidEmail)
@@ -106,4 +109,57 @@ JSON format:
         revenuePotential: 'Unknown',
         decisionMaker: 'Decision Maker'
     }
+}
+export async function batchAnalyzeBusinessGaps(companies: ExtractedCompanyData[], domain: string): Promise<LeadAnalysis[]> {
+    if (companies.length === 0) return []
+
+    const companiesList = companies.map((c, i) => `
+ID: ${i}
+Name: ${c.companyName}
+Website: ${c.url}
+Description: ${c.description}
+Services: ${c.services.join(', ')}
+Tech Stack: ${c.techStack.join(', ')}
+`).join('\n')
+
+    const prompt = `You are a business development analyst. Analyze these ${companies.length} companies and determine if they are good leads for selling "${domain}" services.
+
+COMPANIES:
+${companiesList}
+
+Task: Provide a lead analysis for EACH company in a SINGLE JSON array.
+Return ONLY valid JSON array with objects in the same order as IDs.
+
+JSON format:
+[
+  {
+    "alreadyUsesDomain": false,
+    "businessGaps": ["gap1", "gap2"],
+    "whatToSell": "specific service",
+    "useCase": "use case",
+    "salesStrategy": "strategy",
+    "outreachMessage": "short pitch",
+    "revenuePotential": "$X,XXX/mo",
+    "decisionMaker": "Likely Title"
+  },
+  ...
+]`
+
+    try {
+        const raw = await groqComplete(
+            'You are a business development analyst. Respond with ONLY a valid JSON array.',
+            prompt,
+            { temperature: 0.3, maxTokens: Math.min(companies.length * 600 + 200, 4000) }
+        )
+        const match = raw.match(/\[[\s\S]*\]/)
+        if (match) {
+            const results = JSON.parse(match[0]) as LeadAnalysis[]
+            if (results.length === companies.length) return results
+        }
+    } catch (err) {
+        logger.error('CriticAgent: batch gap analysis failed', { meta: err })
+    }
+
+    // Fallback to individual for robustness or if batch failed
+    return Promise.all(companies.map(c => analyzeBusinessGap(c, domain)))
 }

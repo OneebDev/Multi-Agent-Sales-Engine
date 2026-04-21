@@ -13,8 +13,8 @@ export const chatController = asyncHandler(async (req: Request, res: Response, n
             return httpError(next, new Error('sessionId, query, and mode are required'), req, 400)
         }
 
-        if (!['learning', 'leads', 'chat', 'auto'].includes(body.mode)) {
-            return httpError(next, new Error('mode must be learning, leads, chat, or auto'), req, 400)
+        if (!['learning', 'leads', 'chat', 'auto', 'job-hunter'].includes(body.mode)) {
+            return httpError(next, new Error('mode must be learning, leads, chat, auto, or job-hunter'), req, 400)
         }
 
         const result = await aiService.chat(body)

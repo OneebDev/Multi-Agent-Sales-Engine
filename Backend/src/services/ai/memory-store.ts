@@ -11,7 +11,7 @@ export async function persistChatMessage(
     sessionId: string,
     role: 'user' | 'assistant' | 'system',
     content: string,
-    mode: 'learning' | 'leads' | 'chat' | 'mixed' | 'market-intel' = 'chat'
+    mode: 'learning' | 'leads' | 'chat' | 'mixed' | 'market-intel' | 'job-hunter' | 'auto' = 'chat'
 ): Promise<void> {
     try {
         await ChatSessionModel.findOneAndUpdate(
@@ -72,7 +72,8 @@ export async function persistLeadsJob(sessionId: string, result: LeadsResponse):
                 techStack: l.techStack,
                 confidenceScore: l.confidenceScore,
                 justification: l.justification,
-                scrapedAt: new Date(l.scrapedAt)
+                scrapedAt: new Date(l.scrapedAt),
+                verificationStatus: l.verificationStatus
             })),
             overallStrategy: result.overallStrategy,
             processingNotes: result.processingNotes,

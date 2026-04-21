@@ -38,9 +38,9 @@ async function serperRequest(endpoint: string, payload: Record<string, unknown>)
     return data
 }
 
-export async function webSearch(query: string, num = 10): Promise<SerperResult[]> {
+export async function webSearch(query: string, num = 20): Promise<SerperResult[]> {
     try {
-        const res = await serperRequest('/search', { q: query, num })
+        const res = await serperRequest('/search', { q: query, num: Math.min(num, 100) })
         return res.organic || []
     } catch (err) {
         logger.error('Serper web search failed', { meta: { query, err } })
@@ -48,9 +48,9 @@ export async function webSearch(query: string, num = 10): Promise<SerperResult[]
     }
 }
 
-export async function newsSearch(query: string, num = 6): Promise<SerperNewsResult[]> {
+export async function newsSearch(query: string, num = 10): Promise<SerperNewsResult[]> {
     try {
-        const res = await serperRequest('/news', { q: query, num })
+        const res = await serperRequest('/news', { q: query, num: Math.min(num, 100) })
         return res.news || []
     } catch (err) {
         logger.error('Serper news search failed', { meta: { query, err } })
@@ -58,16 +58,34 @@ export async function newsSearch(query: string, num = 6): Promise<SerperNewsResu
     }
 }
 
-export async function searchCompanies(domain: string, sector: string, location: string, num = 20): Promise<SerperResult[]> {
+export async function searchTargetedLeads(
+    query: string, 
+    source: 'google' | 'linkedin' | 'facebook' | 'instagram' | 'twitter' | 'other',
+    num = 40
+): Promise<SerperResult[]> {
+    let siteQuery = query
+    
+    if (source === 'linkedin') siteQuery = `site:linkedin.com/company ${query}`
+    else if (source === 'facebook') siteQuery = `site:facebook.com ${query}`
+    else if (source === 'instagram') siteQuery = `site:instagram.com ${query}`
+    else if (source === 'twitter') siteQuery = `site:twitter.com ${query}`
+    else if (source === 'google') siteQuery = `${query} -site:linkedin.com -site:facebook.com -site:twitter.com -site:instagram.com`
+
+    return webSearch(siteQuery, num)
+}
+
+export async function searchCompanies(_domain: string, sector: string, location: string, num = 40): Promise<SerperResult[]> {
+    const allResults: SerperResult[] = []
+    
+    // Mix of general web and specific professional profiles
     const queries = [
-        `${sector} companies in ${location} need ${domain}`,
-        `${sector} businesses ${location} site:linkedin.com OR site:crunchbase.com`,
-        `top ${sector} companies ${location} ${domain} services`
+        { q: `${sector} companies in ${location}`, src: 'google' as const },
+        { q: `${sector} businesses ${location}`, src: 'linkedin' as const },
+        { q: `${sector} ${location}`, src: 'facebook' as const }
     ]
 
-    const allResults: SerperResult[] = []
-    for (const q of queries) {
-        const results = await webSearch(q, num)
+    for (const item of queries) {
+        const results = await searchTargetedLeads(item.q, item.src, num)
         allResults.push(...results)
     }
 
@@ -85,6 +103,7 @@ export async function searchCompanies(domain: string, sector: string, location: 
     })
 }
 
-export async function searchPapers(query: string, num = 5): Promise<SerperResult[]> {
-    return webSearch(`${query} research paper site:arxiv.org OR site:semanticscholar.org OR site:scholar.google.com`, num)
+export async function searchPapers(query: string, num = 10): Promise<SerperResult[]> {
+    const refinedQuery = `"${query}" research papers OR "academic" OR "study" site:arxiv.org OR site:semanticscholar.org OR site:scholar.google.com`
+    return webSearch(refinedQuery, Math.min(num, 100))
 }

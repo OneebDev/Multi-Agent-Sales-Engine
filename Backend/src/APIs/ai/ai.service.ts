@@ -23,19 +23,18 @@ export async function chat(req: ChatRequest) {
     // Fire-and-forget DB persistence — never blocks the response
     void persistChatMessage(req.sessionId, 'user', req.query, result.mode)
 
-    if (result.mode === 'leads' && !result.needsMoreInfo) {
-        void persistLeadsJob(req.sessionId, result.response as LeadsResponse)
-        const assistant = `Generated ${(result.response as LeadsResponse).leads?.length ?? 0} leads`
-        void persistChatMessage(req.sessionId, 'assistant', assistant, 'leads')
-    } else if (result.mode === 'chat') {
-        const chatReply = (result.response as { reply: string }).reply || ''
-        void persistChatMessage(req.sessionId, 'assistant', chatReply, 'chat')
-    } else if (result.mode === 'learning') {
-        const summary = (result.response as { simpleExplanation: string }).simpleExplanation || ''
-        void persistChatMessage(req.sessionId, 'assistant', summary.slice(0, 500), 'learning')
-    } else if (result.mode === 'market-intel') {
-        const rec = (result.response as { recommendation: string }).recommendation || ''
-        void persistChatMessage(req.sessionId, 'assistant', rec, 'market-intel')
+    if (result.category === 'Lead Intelligence' && !result.needsMoreInfo) {
+        const leadData = result.data as LeadsResponse
+        if (leadData) {
+            void persistLeadsJob(req.sessionId, leadData)
+            void persistChatMessage(req.sessionId, 'assistant', `Generated ${leadData.leads?.length ?? 0} leads`, 'leads')
+        }
+    } else if (result.category === 'Chat' || result.mode === 'chat') {
+        void persistChatMessage(req.sessionId, 'assistant', result.response, 'chat')
+    } else if (result.category === 'Deep Research' || result.mode === 'learning') {
+        void persistChatMessage(req.sessionId, 'assistant', result.response.slice(0, 500), 'learning')
+    } else if (result.category === 'Market Intelligence' || result.mode === 'market-intel') {
+        void persistChatMessage(req.sessionId, 'assistant', result.response, 'market-intel')
     }
 
     return result

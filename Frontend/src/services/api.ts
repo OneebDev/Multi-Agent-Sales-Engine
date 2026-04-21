@@ -4,7 +4,8 @@ import { ApiResponse, OrchestratorOutput } from '../types'
 const api = axios.create({
   baseURL: '/v1',
   headers: { 'Content-Type': 'application/json' },
-  withCredentials: true
+  withCredentials: true,
+  timeout: 130000 // 130 second buffer for backend circuit breakers
 })
 
 // Extract a human-readable message from API errors
@@ -25,15 +26,15 @@ api.interceptors.response.use(
 export interface ChatPayload {
   sessionId: string
   query: string
-  mode: 'chat' | 'learning' | 'leads' | 'auto'
+  mode: 'chat' | 'learning' | 'leads' | 'auto' | 'job-hunter'
   domain?: string
   sector?: string
   country?: string
   city?: string
 }
 
-export async function sendChat(payload: ChatPayload): Promise<OrchestratorOutput> {
-  const { data } = await api.post<ApiResponse<OrchestratorOutput>>('/ai/chat', payload)
+export async function sendChat(payload: ChatPayload, signal?: AbortSignal): Promise<OrchestratorOutput> {
+  const { data } = await api.post<ApiResponse<OrchestratorOutput>>('/ai/chat', payload, { signal })
   return data.data
 }
 

@@ -12,24 +12,31 @@ interface Props {
 }
 
 export function InputBar({ onSubmit, disabled, injectedQuery, onInjectedConsumed }: Props) {
-  const [value, setValue] = useState('')
+  const { mode, leadsForm, setLeadsForm, drafts, setDraft } = useStore()
+  const [value, setValue] = useState(drafts[mode] || '')
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const [showLeadsFields, setShowLeadsFields] = useState(false)
+
+  // Sync draft when mode changes
+  useEffect(() => {
+    setValue(drafts[mode] || '')
+  }, [mode, drafts])
 
   // Accept injected suggestion
   useEffect(() => {
     if (injectedQuery) {
       setValue(injectedQuery)
+      setDraft(mode, injectedQuery)
       onInjectedConsumed?.()
     }
-  }, [injectedQuery, onInjectedConsumed])
-  const { mode, leadsForm, setLeadsForm } = useStore()
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const [showLeadsFields, setShowLeadsFields] = useState(false)
+  }, [injectedQuery, onInjectedConsumed, mode, setDraft])
 
   const handleSubmit = () => {
     const trimmed = value.trim()
     if (!trimmed || disabled) return
     onSubmit(trimmed)
     setValue('')
+    setDraft(mode, '') // Clear the draft for this mode on submission
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
@@ -117,7 +124,12 @@ export function InputBar({ onSubmit, disabled, injectedQuery, onInjectedConsumed
         <textarea
           ref={textareaRef}
           value={value}
-          onChange={(e) => { setValue(e.target.value); handleInput() }}
+          onChange={(e) => { 
+            const val = e.target.value
+            setValue(val)
+            setDraft(mode, val)
+            handleInput() 
+          }}
           onKeyDown={handleKeyDown}
           disabled={disabled}
           placeholder={

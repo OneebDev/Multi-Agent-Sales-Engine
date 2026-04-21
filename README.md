@@ -6,7 +6,17 @@
 [![MongoDB](https://img.shields.io/badge/MongoDB-4EA94B?style=for-the-badge&logo=mongodb&logoColor=white)](https://www.mongodb.com/)
 [![Docker](https://img.shields.io/badge/Docker-2CA5E0?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 
-**Multi-Agent Sales Engine** is a high-precision, autonomous business intelligence platform. It orchestrates multiple specialized AI agents to transform simple queries into comprehensive market research, lead databases, and personalized sales strategies.
+# Multi-Agent Sales & Intelligence Engine (v17.2)
+
+An advanced AI-powered platform for multi-agent business intelligence, high-precision lead generation, and professional job hunting.
+
+## 🚀 Key Features
+
+- **🎯 Precision Job Hunter (v17.0+)**: Uses AI "Role Critic" and HTML-based scans to find active, exact-match jobs across LinkedIn, Indeed, and Glassdoor.
+- **🛡️ Multi-Source Reliability**: Parallel fetching with diversity enforcement ensures you never miss a lead or a listing.
+- **🔍 Deep Research Agent**: Multi-step terminal-driven research for comprehensive market intelligence.
+- **⚡ Supercharged Leads**: High-confidences lead generation with fallback mechanisms for 100% data availability.
+- **🧠 Zero-Crash Architecture**: Bulletproof state machines and parallel backoff logic to ensure 24/7 uptime.
 
 ---
 

@@ -60,6 +60,7 @@ services:
       dockerfile: docker/production/Dockerfile
     container_name: ai-platform-backend
     restart: unless-stopped
+    env_file: .env
     ports:
       - "3000:3000"
     environment:
@@ -79,7 +80,9 @@ services:
       GROQ_API_KEY: ${GROQ_API_KEY}
       GROQ_API_KEY_2: ${GROQ_API_KEY_2:-}
       GROQ_API_KEY_3: ${GROQ_API_KEY_3:-}
+      GROQ_API_KEY_4: ${GROQ_API_KEY_4:-}
       GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_FALLBACK_MODELS: ${GROQ_FALLBACK_MODELS:-mixtral-8x7b-32768,llama-3.1-70b-versatile,llama3-70b-8192}
       SERPER_API_KEY: ${SERPER_API_KEY}
       YOUTUBE_API_KEY: ${YOUTUBE_API_KEY}
 

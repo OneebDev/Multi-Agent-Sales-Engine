@@ -1,4 +1,4 @@
-export type AppMode = 'chat' | 'learning' | 'leads' | 'auto'
+export type AppMode = 'chat' | 'learning' | 'leads' | 'auto' | 'job-hunter'
 
 // ─── Learning Types ───────────────────────────────────────────────────────────
 export interface ArticleRef {
@@ -139,6 +139,7 @@ export interface StructuredLead {
   justification: LeadJustification
   confidenceScore: number
   scrapedAt: string
+  verificationStatus: 'verified' | 'partially_verified' | 'unverified'
 }
 
 export interface LeadsResponse {
@@ -153,6 +154,25 @@ export interface LeadsResponse {
   overallStrategy: string
 }
 
+// ─── Job Hunter Types ──────────────────────────────────────────────────────────
+export interface JobListing {
+  title: string
+  company: string
+  location: string
+  skills: string[]
+  url: string
+  date: string
+  score: number
+  verificationStatus: 'verified' | 'partially_verified' | 'unverified'
+}
+
+export interface JobHunterResponse {
+  type: 'chat' | 'jobs'
+  content: string
+  jobs?: JobListing[]
+  intent?: string
+}
+
 // ─── Chat Message ─────────────────────────────────────────────────────────────
 export interface ChatMessage {
   id: string
@@ -160,12 +180,33 @@ export interface ChatMessage {
   content: string
   mode: AppMode
   timestamp: string
+  metadata?: {
+    intent?: string
+    confidence?: number
+    reasoning?: string
+    routed_to?: AppMode
+    isActiveVersion?: boolean
+    category?: string // New categorisation (Career & Jobs, Market Intelligence, etc.)
+  }
   learningData?: LearningResponse
   leadsData?: LeadsResponse
   marketIntelData?: MarketIntelResponse
+  jobHunterData?: JobHunterResponse
   needsMoreInfo?: { fields: string[]; message: string }
   isLoading?: boolean
   error?: string
+  
+  // Standardised Data Wrapper
+  success?: boolean
+  category?: string
+  language?: 'en' | 'ur' | 'roman-ur'
+  insights?: string[]
+  data?: any
+  
+  // ─── Versioning & Parallelism ──────────────────────────────────────────────
+  parentMessageId?: string  // For edited user prompts
+  versionIndex?: number    // 1-based index
+  totalVersions?: number
 }
 
 // ─── Normal Chat ──────────────────────────────────────────────────────────────
@@ -192,9 +233,31 @@ export interface ApiResponse<T> {
 
 export interface OrchestratorOutput {
   sessionId: string
-  mode: 'learning' | 'leads' | 'chat' | 'market-intel'
-  response: LearningResponse | LeadsResponse | NormalChatResponse | MarketIntelResponse
+  mode: AppMode | 'market-intel'
+  success: boolean
+  category: string
+  language: 'en' | 'ur' | 'roman-ur'
+  response: LearningResponse | LeadsResponse | NormalChatResponse | MarketIntelResponse | JobHunterResponse | string
+  data?: any
+  insights?: string[]
   needsMoreInfo?: { fields: string[]; message: string }
   detectedLanguage?: string
   timestamp: string
+  metadata?: {
+    intent?: string
+    confidence?: number
+    reasoning?: string
+    routed_to?: AppMode
+    isActiveVersion?: boolean
+  }
+}
+
+export interface UserProfile {
+  skills: string[]
+  interests: string[]
+  goals: string[]
+  preferences: Record<string, any>
+  behavior_summary: string
+  intent_patterns: string[]
+  usage_frequency: Record<string, number>
 }
